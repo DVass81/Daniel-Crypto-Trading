@@ -2,7 +2,13 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
+
+try:
+    import tomllib
+except ModuleNotFoundError:
+    tomllib = None
 
 
 def _secret(secrets: Any, name: str, default: str = "") -> str:
@@ -44,7 +50,7 @@ class BotConfig:
 
 
 def load_config(secrets: Any | None = None) -> BotConfig:
-    secrets = secrets or {}
+    secrets = secrets or _load_local_streamlit_secrets()
     return BotConfig(
         coinbase_api_key=_secret(secrets, "COINBASE_API_KEY"),
         coinbase_api_secret=_secret(secrets, "COINBASE_API_SECRET"),
@@ -62,3 +68,13 @@ def load_config(secrets: Any | None = None) -> BotConfig:
         confidence_to_sell=_secret_float(secrets, "CONFIDENCE_TO_SELL", 0.54),
         cycle_seconds=int(_secret_float(secrets, "CYCLE_SECONDS", 300)),
     )
+
+
+def _load_local_streamlit_secrets() -> dict[str, Any]:
+    secrets_path = Path(".streamlit/secrets.toml")
+    if not tomllib or not secrets_path.exists():
+        return {}
+    try:
+        return tomllib.loads(secrets_path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}

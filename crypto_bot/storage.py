@@ -53,7 +53,7 @@ class BotStorage:
             try:
                 rows = self._supabase.table("crypto_bot_state").select("*").eq("id", state_id).execute().data
                 if rows:
-                    return {**defaults, **rows[0].get("payload", {})}
+                    return {**defaults, **_coerce_payload(rows[0].get("payload"))}
             except Exception:
                 pass
         DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -64,10 +64,10 @@ class BotStorage:
                 state["cash_usd"] = self.config.starting_cash
             self.save_state(state, state_id)
             return state
-        return {**defaults, **json.loads(path.read_text(encoding="utf-8"))}
+        return {**defaults, **_coerce_payload(json.loads(path.read_text(encoding="utf-8")))}
 
     def save_state(self, state: dict[str, Any], state_id: str = "paper") -> None:
-        state = {**state, "updated_at": now_iso()}
+        state = {**_coerce_payload(state), "updated_at": now_iso()}
         if self._supabase:
             try:
                 self._supabase.table("crypto_bot_state").upsert({"id": state_id, "payload": state}).execute()
@@ -122,3 +122,15 @@ class BotStorage:
 
 def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _coerce_payload(payload: Any) -> dict[str, Any]:
+    if isinstance(payload, dict):
+        return payload
+    if isinstance(payload, str):
+        try:
+            parsed = json.loads(payload)
+            return parsed if isinstance(parsed, dict) else {}
+        except json.JSONDecodeError:
+            return {}
+    return {}

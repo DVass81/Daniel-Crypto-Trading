@@ -289,7 +289,7 @@ def render_trade_cards(rows: list[dict[str, Any]]) -> None:
         st.markdown(
             f"""
             <div class="trade-card {action}">
-                <strong>{row.get("action") or "UNKNOWN"}</strong> · {row.get("kind")} · {row.get("created_at")}<br>
+                <strong>{row.get("action") or "UNKNOWN"}</strong> - {row.get("kind")} - {row.get("created_at")}<br>
                 <span style="color:#9fb0c0;">{row.get("reason") or "No reason recorded."}</span>
             </div>
             """,

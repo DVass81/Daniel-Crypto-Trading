@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from datetime import datetime
 from typing import Any
 
@@ -15,6 +16,33 @@ from crypto_bot.strategy import score_market
 
 st.set_page_config(page_title="Crypto Bot Lab", page_icon="$", layout="wide")
 
+STRATEGY_PROFILES = {
+    "Conservative": {
+        "max_trade_usd": 10.0,
+        "max_daily_loss_usd": 8.0,
+        "stop_loss_pct": 0.025,
+        "take_profit_pct": 0.045,
+        "confidence_to_buy": 0.72,
+        "confidence_to_sell": 0.58,
+    },
+    "Balanced": {
+        "max_trade_usd": 15.0,
+        "max_daily_loss_usd": 15.0,
+        "stop_loss_pct": 0.035,
+        "take_profit_pct": 0.07,
+        "confidence_to_buy": 0.62,
+        "confidence_to_sell": 0.54,
+    },
+    "Aggressive": {
+        "max_trade_usd": 25.0,
+        "max_daily_loss_usd": 25.0,
+        "stop_loss_pct": 0.055,
+        "take_profit_pct": 0.11,
+        "confidence_to_buy": 0.55,
+        "confidence_to_sell": 0.50,
+    },
+}
+
 
 def render_css() -> None:
     st.markdown(
@@ -22,10 +50,11 @@ def render_css() -> None:
         <style>
         .block-container { padding-top: 1.5rem; max-width: 1280px; }
         div[data-testid="stMetric"] {
-            background: #101820;
-            border: 1px solid #243241;
+            background: #0b131d;
+            border: 1px solid #263748;
             border-radius: 8px;
             padding: 14px 16px;
+            box-shadow: inset 0 1px 0 rgba(255,255,255,0.03);
         }
         div[data-testid="stMetric"] label { color: #a7b2bf; }
         div[data-testid="stMetric"] [data-testid="stMetricValue"] { color: #f5f7fa; }
@@ -49,7 +78,7 @@ def render_css() -> None:
             border: 1px solid #253446;
             border-radius: 8px;
             padding: 18px 20px;
-            background: linear-gradient(135deg, #101820 0%, #162536 62%, #113329 100%);
+            background: linear-gradient(135deg, #09111a 0%, #102133 54%, #0c3428 100%);
             margin-bottom: 14px;
         }
         .hero h1 { margin: 0; color: #f7fafc; font-size: 2rem; letter-spacing: 0; }
@@ -59,6 +88,24 @@ def render_css() -> None:
             border-radius: 8px;
             padding: 16px;
             background: #0f1720;
+        }
+        .terminal-panel {
+            border: 1px solid #253446;
+            border-radius: 8px;
+            padding: 12px 14px;
+            background: #080f17;
+        }
+        .terminal-title {
+            color: #8ea1b5;
+            font-size: 0.78rem;
+            font-weight: 700;
+            text-transform: uppercase;
+            margin-bottom: 8px;
+        }
+        .terminal-value {
+            color: #ecf3f8;
+            font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+            font-size: 1.1rem;
         }
         .small-muted { color: #9aa8b6; font-size: 0.86rem; }
         </style>
@@ -103,12 +150,68 @@ def flatten_event(item: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def default_settings(config: Any) -> dict[str, Any]:
+    return {
+        "trading_mode": config.trading_mode,
+        "strategy_profile": "Balanced",
+        "max_trade_usd": config.max_trade_usd,
+        "max_daily_loss_usd": config.max_daily_loss_usd,
+        "stop_loss_pct": config.stop_loss_pct,
+        "take_profit_pct": config.take_profit_pct,
+        "confidence_to_buy": config.confidence_to_buy,
+        "confidence_to_sell": config.confidence_to_sell,
+    }
+
+
+def get_settings(state: dict[str, Any], config: Any) -> dict[str, Any]:
+    return {**default_settings(config), **(state.get("settings") or {})}
+
+
+def save_settings(storage: BotStorage, state: dict[str, Any], settings: dict[str, Any]) -> None:
+    state["settings"] = settings
+    storage.save_state(state)
+
+
+def config_with_settings(config: Any, settings: dict[str, Any]) -> Any:
+    return replace(
+        config,
+        trading_mode=str(settings["trading_mode"]).lower(),
+        max_trade_usd=float(settings["max_trade_usd"]),
+        max_daily_loss_usd=float(settings["max_daily_loss_usd"]),
+        stop_loss_pct=float(settings["stop_loss_pct"]),
+        take_profit_pct=float(settings["take_profit_pct"]),
+        confidence_to_buy=float(settings["confidence_to_buy"]),
+        confidence_to_sell=float(settings["confidence_to_sell"]),
+    )
+
+
+def equity_history(events: list[dict[str, Any]], starting_cash: float) -> pd.DataFrame:
+    rows = []
+    for item in reversed(events):
+        payload = item.get("payload") or {}
+        signal = payload.get("signal") or {}
+        state_payload = payload.get("state") or {}
+        price = float(signal.get("price") or 0)
+        cash = float(state_payload.get("cash_usd") or starting_cash)
+        base = float(state_payload.get("base_size") or 0)
+        rows.append(
+            {
+                "time": parse_time(item.get("created_at")),
+                "equity": cash + (base * price),
+            }
+        )
+    return pd.DataFrame(rows)
+
+
 render_css()
 
-config = load_config(st.secrets)
-storage = BotStorage(config)
-client = CoinbaseClient(config)
+base_config = load_config(st.secrets)
+storage = BotStorage(base_config)
 state = storage.load_state()
+settings = get_settings(state, base_config)
+config = config_with_settings(base_config, settings)
+client = CoinbaseClient(config)
+events = storage.list_events()
 
 coinbase_configured = bool(config.coinbase_api_key and config.coinbase_api_secret)
 supabase_configured = bool(config.supabase_url and config.supabase_anon_key)
@@ -140,9 +243,30 @@ st.markdown(f'<div class="status-row">{"".join(status_html)}</div>', unsafe_allo
 with st.sidebar:
     st.header("Bot Controls")
     st.write(f"Product: `{config.product_id}`")
+    st.write(f"Strategy: `{settings['strategy_profile']}`")
     st.write(f"Cycle interval: `{config.cycle_seconds}s`")
     st.write(f"Max trade: `{fmt_money(config.max_trade_usd)}`")
     st.write(f"Daily loss stop: `{fmt_money(config.max_daily_loss_usd)}`")
+
+    st.divider()
+    target_live = st.toggle("Live trading mode", value=config.live_enabled)
+    if target_live != config.live_enabled:
+        if target_live:
+            st.warning("Live mode can place real Coinbase orders.")
+            live_mode_ack = st.text_input("Type I ACCEPT THE RISK to enable live mode")
+            if st.button("Confirm Live Mode"):
+                if live_mode_ack == "I ACCEPT THE RISK" and coinbase_client_ready:
+                    settings["trading_mode"] = "live"
+                    save_settings(storage, state, settings)
+                    st.rerun()
+                elif not coinbase_client_ready:
+                    st.error("Coinbase credentials are not ready.")
+                else:
+                    st.error("Confirmation text did not match.")
+        else:
+            settings["trading_mode"] = "paper"
+            save_settings(storage, state, settings)
+            st.rerun()
 
     live_ack = True
     if config.live_enabled:
@@ -214,10 +338,15 @@ with overview_tab:
     with left:
         st.subheader("Market Price")
         if not candles.empty:
-            chart_frame = candles.set_index("time")[["close"]]
-            st.line_chart(chart_frame, use_container_width=True)
+            chart_frame = candles.set_index("time")[["close"]].rename(columns={"close": "Close"})
+            st.line_chart(chart_frame, use_container_width=True, height=360)
         else:
             st.info("No candle data available yet.")
+
+        history_frame = equity_history(events, config.starting_cash)
+        if not history_frame.empty:
+            st.subheader("Paper Equity Curve")
+            st.line_chart(history_frame.set_index("time"), use_container_width=True, height=220)
     with right:
         st.subheader("Current Decision")
         st.markdown('<div class="signal-box">', unsafe_allow_html=True)
@@ -256,7 +385,6 @@ with signal_tab:
 
 with events_tab:
     st.subheader("Bot Event History")
-    events = storage.list_events()
     rows = [flatten_event(item) for item in events]
     if rows:
         event_frame = pd.DataFrame(rows)
@@ -296,6 +424,41 @@ with risk_tab:
     else:
         st.success("Risk settings look reasonable for paper testing.")
 
+    st.subheader("Runtime Settings")
+    selected_profile = st.selectbox(
+        "Strategy profile",
+        list(STRATEGY_PROFILES),
+        index=list(STRATEGY_PROFILES).index(str(settings.get("strategy_profile", "Balanced"))),
+    )
+    profile_values = STRATEGY_PROFILES[selected_profile]
+    if selected_profile != settings.get("strategy_profile"):
+        settings = {**settings, "strategy_profile": selected_profile, **profile_values}
+        save_settings(storage, state, settings)
+        st.rerun()
+
+    with st.form("risk_settings_form"):
+        new_max_trade = st.number_input("Max trade USD", min_value=1.0, max_value=100.0, value=float(settings["max_trade_usd"]), step=1.0)
+        new_daily_loss = st.number_input("Max daily loss USD", min_value=1.0, max_value=100.0, value=float(settings["max_daily_loss_usd"]), step=1.0)
+        new_stop_loss = st.slider("Stop loss", min_value=0.005, max_value=0.20, value=float(settings["stop_loss_pct"]), step=0.005, format="%.3f")
+        new_take_profit = st.slider("Take profit", min_value=0.005, max_value=0.30, value=float(settings["take_profit_pct"]), step=0.005, format="%.3f")
+        new_buy_conf = st.slider("Buy confidence", min_value=0.40, max_value=0.95, value=float(settings["confidence_to_buy"]), step=0.01)
+        new_sell_conf = st.slider("Sell confidence", min_value=0.40, max_value=0.95, value=float(settings["confidence_to_sell"]), step=0.01)
+        if st.form_submit_button("Save Runtime Settings", type="primary"):
+            settings.update(
+                {
+                    "strategy_profile": selected_profile,
+                    "max_trade_usd": new_max_trade,
+                    "max_daily_loss_usd": new_daily_loss,
+                    "stop_loss_pct": new_stop_loss,
+                    "take_profit_pct": new_take_profit,
+                    "confidence_to_buy": new_buy_conf,
+                    "confidence_to_sell": new_sell_conf,
+                }
+            )
+            save_settings(storage, state, settings)
+            st.success("Settings saved.")
+            st.rerun()
+
 with setup_tab:
     st.subheader("Deployment Health")
     health = pd.DataFrame(
@@ -309,6 +472,21 @@ with setup_tab:
         ]
     )
     st.dataframe(health, use_container_width=True, hide_index=True)
+
+    st.subheader("Coinbase Account Check")
+    if st.button("Test Coinbase Account Read"):
+        if not coinbase_client_ready:
+            st.error("Coinbase client is not ready. Check API key name and private key formatting.")
+        else:
+            try:
+                accounts = client.get_accounts()
+                if accounts:
+                    st.success(f"Connected. Coinbase returned {len(accounts)} account records.")
+                    st.dataframe(pd.DataFrame(accounts), use_container_width=True, hide_index=True)
+                else:
+                    st.warning("Connected, but no account records were returned.")
+            except Exception as exc:
+                st.error(f"Coinbase account read failed: {exc}")
 
     st.subheader("Suggested Next Upgrades")
     st.write(

@@ -47,6 +47,28 @@ class CoinbaseClient:
         data = requests.get(url, timeout=15).json()
         return float(data.get("price", 0))
 
+    def get_accounts(self) -> list[dict[str, Any]]:
+        if not self._client:
+            return []
+        raw = self._client.get_accounts()
+        data = _dictish(raw)
+        accounts = data.get("accounts", raw if isinstance(raw, list) else [])
+        rows = []
+        for account in accounts:
+            item = _dictish(account)
+            balance = _dictish(item.get("available_balance", {}))
+            hold = _dictish(item.get("hold", {}))
+            rows.append(
+                {
+                    "currency": item.get("currency"),
+                    "available": balance.get("value"),
+                    "available_currency": balance.get("currency"),
+                    "hold": hold.get("value"),
+                    "uuid": item.get("uuid"),
+                }
+            )
+        return rows
+
     def get_candles(self, product_id: str, granularity: str = "FIFTEEN_MINUTE", limit: int = 96) -> pd.DataFrame:
         end = datetime.now(timezone.utc)
         start = end - timedelta(minutes=15 * limit)
@@ -110,6 +132,8 @@ def _dictish(value: Any) -> dict[str, Any]:
         return value.to_dict()
     if isinstance(value, dict):
         return value
+    if hasattr(value, "__dict__"):
+        return dict(value.__dict__)
     try:
         return dict(value)
     except Exception:

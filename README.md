@@ -29,6 +29,7 @@ PRODUCT_ID = "BTC-USD"
 STARTING_CASH = "100"
 MAX_TRADE_USD = "15"
 MAX_DAILY_LOSS_USD = "15"
+ESTIMATED_FEE_PCT = "0.006"
 SUPABASE_URL = "https://your-project.supabase.co"
 SUPABASE_ANON_KEY = "your-anon-key"
 ```
@@ -53,3 +54,8 @@ Deploy this repo with:
 - Python requirements: `requirements.txt`
 - Secrets: the values above
 
+## Operations
+
+The Streamlit app is the control dashboard. For true always-on operation, run `python crypto_bot_runner.py` on a small always-on host such as Render, Railway, Fly.io, or a VPS. The dashboard shows the runner heartbeat from the active paper/live state.
+
+Paper and live trading keep separate state records, so paper testing does not overwrite live state. The dashboard can switch modes, but live mode requires explicit confirmation text and Coinbase credentials.

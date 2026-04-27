@@ -42,6 +42,7 @@ class BotConfig:
     take_profit_pct: float = 0.07
     confidence_to_buy: float = 0.62
     confidence_to_sell: float = 0.54
+    estimated_fee_pct: float = 0.006
     cycle_seconds: int = 300
 
     @property
@@ -66,6 +67,7 @@ def load_config(secrets: Any | None = None) -> BotConfig:
         take_profit_pct=_secret_float(secrets, "TAKE_PROFIT_PCT", 0.07),
         confidence_to_buy=_secret_float(secrets, "CONFIDENCE_TO_BUY", 0.62),
         confidence_to_sell=_secret_float(secrets, "CONFIDENCE_TO_SELL", 0.54),
+        estimated_fee_pct=_secret_float(secrets, "ESTIMATED_FEE_PCT", 0.006),
         cycle_seconds=int(_secret_float(secrets, "CYCLE_SECONDS", 300)),
     )
 

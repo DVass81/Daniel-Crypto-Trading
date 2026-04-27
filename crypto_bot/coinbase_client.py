@@ -69,6 +69,18 @@ class CoinbaseClient:
             )
         return rows
 
+    def get_available_balances(self) -> dict[str, float]:
+        balances: dict[str, float] = {}
+        for account in self.get_accounts():
+            currency = str(account.get("currency") or account.get("available_currency") or "")
+            if not currency:
+                continue
+            try:
+                balances[currency] = float(account.get("available") or 0)
+            except (TypeError, ValueError):
+                balances[currency] = 0.0
+        return balances
+
     def get_candles(self, product_id: str, granularity: str = "FIFTEEN_MINUTE", limit: int = 96) -> pd.DataFrame:
         end = datetime.now(timezone.utc)
         start = end - timedelta(minutes=15 * limit)

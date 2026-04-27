@@ -47,6 +47,22 @@ class CoinbaseClient:
         data = requests.get(url, timeout=15).json()
         return float(data.get("price", 0))
 
+    def get_products(self, limit: int = 250) -> list[dict[str, Any]]:
+        if self._client:
+            try:
+                raw = self._client.get_products(limit=limit)
+                data = _dictish(raw)
+                products = data.get("products", raw if isinstance(raw, list) else [])
+                return [_product_row(item) for item in products]
+            except Exception:
+                pass
+
+        url = "https://api.coinbase.com/api/v3/brokerage/market/products"
+        params = {"limit": limit}
+        data = requests.get(url, params=params, timeout=20).json()
+        products = data.get("products", [])
+        return [_product_row(item) for item in products]
+
     def get_accounts(self) -> list[dict[str, Any]]:
         if not self._client:
             return []
@@ -150,3 +166,18 @@ def _dictish(value: Any) -> dict[str, Any]:
         return dict(value)
     except Exception:
         return {}
+
+
+def _product_row(value: Any) -> dict[str, Any]:
+    item = _dictish(value)
+    return {
+        "product_id": item.get("product_id"),
+        "base_currency_id": item.get("base_currency_id"),
+        "quote_currency_id": item.get("quote_currency_id"),
+        "price": item.get("price"),
+        "price_percentage_change_24h": item.get("price_percentage_change_24h"),
+        "volume_24h": item.get("volume_24h"),
+        "volume_percentage_change_24h": item.get("volume_percentage_change_24h"),
+        "status": item.get("status"),
+        "trading_disabled": item.get("trading_disabled"),
+    }

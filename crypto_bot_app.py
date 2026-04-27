@@ -11,6 +11,7 @@ import streamlit as st
 from crypto_bot.bot import run_cycle
 from crypto_bot.coinbase_client import CoinbaseClient
 from crypto_bot.config import load_config
+from crypto_bot.market_ai import ai_advice, rank_markets
 from crypto_bot.storage import BotStorage
 from crypto_bot.strategy import score_market
 
@@ -170,6 +171,9 @@ def heartbeat_status(value: Any) -> tuple[str, str]:
 def default_settings(config: Any) -> dict[str, Any]:
     return {
         "trading_mode": config.trading_mode,
+        "product_id": config.product_id,
+        "watchlist": ",".join(config.watchlist),
+        "auto_select_market": config.auto_select_market,
         "strategy_profile": "Balanced",
         "max_trade_usd": config.max_trade_usd,
         "max_daily_loss_usd": config.max_daily_loss_usd,
@@ -194,6 +198,9 @@ def config_with_settings(config: Any, settings: dict[str, Any]) -> Any:
     return replace(
         config,
         trading_mode=str(settings["trading_mode"]).lower(),
+        product_id=str(settings.get("product_id") or config.product_id).upper(),
+        watchlist=tuple(parse_watchlist(settings.get("watchlist") or ",".join(config.watchlist))),
+        auto_select_market=bool(settings.get("auto_select_market", config.auto_select_market)),
         max_trade_usd=float(settings["max_trade_usd"]),
         max_daily_loss_usd=float(settings["max_daily_loss_usd"]),
         stop_loss_pct=float(settings["stop_loss_pct"]),
@@ -202,6 +209,12 @@ def config_with_settings(config: Any, settings: dict[str, Any]) -> Any:
         confidence_to_sell=float(settings["confidence_to_sell"]),
         estimated_fee_pct=float(settings["estimated_fee_pct"]),
     )
+
+
+def parse_watchlist(value: Any) -> list[str]:
+    if isinstance(value, (list, tuple)):
+        return [str(item).strip().upper() for item in value if str(item).strip()]
+    return [item.strip().upper() for item in str(value or "").split(",") if item.strip()]
 
 
 def flatten_event(item: dict[str, Any]) -> dict[str, Any]:
@@ -279,6 +292,28 @@ def order_preview(signal: Any, state: dict[str, Any], config: Any) -> dict[str, 
     return None
 
 
+def load_market_rows(client: CoinbaseClient) -> pd.DataFrame:
+    try:
+        products = client.get_products(limit=250)
+    except Exception:
+        products = []
+    frame = pd.DataFrame(products)
+    if frame.empty:
+        return frame
+    for col in ["quote_currency_id", "trading_disabled", "product_id", "status"]:
+        if col not in frame.columns:
+            frame[col] = None
+    for col in ["price", "price_percentage_change_24h", "volume_24h"]:
+        if col not in frame.columns:
+            frame[col] = 0
+    frame = frame[frame["quote_currency_id"].eq("USD")]
+    frame = frame[frame["trading_disabled"].ne(True)]
+    for col in ["price", "price_percentage_change_24h", "volume_24h"]:
+        if col in frame.columns:
+            frame[col] = pd.to_numeric(frame[col], errors="coerce")
+    return frame.sort_values("volume_24h", ascending=False, na_position="last")
+
+
 def render_trade_cards(rows: list[dict[str, Any]]) -> None:
     trade_rows = [row for row in rows if row.get("kind") in {"trade_attempt", "trade_result", "cycle"}][:8]
     if not trade_rows:
@@ -308,6 +343,7 @@ state_id = "live" if config.live_enabled else "paper"
 state = storage.load_state(state_id)
 client = CoinbaseClient(config)
 events = storage.list_events(300)
+active_product_id = state.get("product_id") or config.product_id
 
 coinbase_configured = bool(config.coinbase_api_key and config.coinbase_api_secret)
 coinbase_client_ready = bool(client._client)
@@ -338,7 +374,8 @@ st.markdown(f'<div class="banner {banner_tone}">{banner_text}</div>', unsafe_all
 status_html = [
     badge(f"Mode: {config.trading_mode.upper()}", "bad" if config.live_enabled else "good"),
     badge(f"State: {state_id}", "neutral"),
-    badge(f"Market: {config.product_id}", "neutral"),
+    badge(f"Market: {active_product_id}", "neutral"),
+    badge("Auto-select on" if config.auto_select_market else "Fixed market", "good" if config.auto_select_market else "neutral"),
     badge("Coinbase key loaded" if coinbase_configured else "Coinbase key missing", "good" if coinbase_configured else "warn"),
     badge("Coinbase SDK ready" if coinbase_client_ready else "Public market data only", "good" if coinbase_client_ready else "warn"),
     badge("Supabase connected" if supabase_connected else "Local fallback storage", "good" if supabase_connected else "warn"),
@@ -348,7 +385,7 @@ st.markdown(f'<div class="status-row">{"".join(status_html)}</div>', unsafe_allo
 
 with st.sidebar:
     st.header("Bot Controls")
-    st.write(f"Product: `{config.product_id}`")
+    st.write(f"Active market: `{active_product_id}`")
     st.write(f"Strategy: `{settings['strategy_profile']}`")
     st.write(f"Max trade: `{fmt_money(config.max_trade_usd)}`")
     st.write(f"Daily loss stop: `{fmt_money(config.max_daily_loss_usd)}`")
@@ -401,7 +438,7 @@ price = 0.0
 price_error = None
 
 try:
-    price = client.get_spot_price(config.product_id)
+    price = client.get_spot_price(active_product_id)
 except Exception as exc:
     price_error = str(exc)
 
@@ -425,7 +462,7 @@ metric_cols[4].metric("Realized P/L", fmt_money(realized_pnl))
 metric_cols[5].metric("Mode Fees", fmt_money(total_fees))
 
 try:
-    candles = client.get_candles(config.product_id)
+    candles = client.get_candles(active_product_id)
 except Exception as exc:
     candles = pd.DataFrame()
     st.error(f"Candle fetch failed: {exc}")
@@ -439,14 +476,54 @@ signal = score_market(
 )
 preview = order_preview(signal, state, config)
 
-overview_tab, signal_tab, events_tab, risk_tab, account_tab, runner_tab = st.tabs(
-    ["Overview", "Signal", "Events", "Risk", "Coinbase", "Runner"]
+market_tab, overview_tab, signal_tab, events_tab, risk_tab, account_tab, runner_tab = st.tabs(
+    ["Markets", "Overview", "Signal", "Events", "Risk", "Coinbase", "Runner"]
 )
+
+with market_tab:
+    st.subheader("Market Browser")
+    c1, c2 = st.columns([1.3, 1])
+    with c1:
+        market_rows = load_market_rows(client)
+        search = st.text_input("Search markets", value="")
+        if not market_rows.empty:
+            visible = market_rows.copy()
+            if search:
+                visible = visible[visible["product_id"].str.contains(search.upper(), na=False)]
+            display_cols = ["product_id", "price", "price_percentage_change_24h", "volume_24h", "status"]
+            st.dataframe(
+                visible[display_cols].head(80),
+                use_container_width=True,
+                hide_index=True,
+            )
+        else:
+            st.warning("Coinbase market list is unavailable right now.")
+    with c2:
+        st.subheader("AI Watchlist Rankings")
+        with st.spinner("Scoring watchlist markets..."):
+            rankings = rank_markets(client, config, limit=min(12, len(config.watchlist)))
+        if rankings:
+            ranking_frame = pd.DataFrame(rankings)
+            st.dataframe(
+                ranking_frame[["product_id", "action", "confidence", "ai_score", "price", "advice"]],
+                use_container_width=True,
+                hide_index=True,
+            )
+            top = rankings[0]
+            st.markdown(f"**Top AI read:** `{top['product_id']}` - `{top['action']}` - confidence `{float(top['confidence']):.2%}`")
+            st.write(ai_advice(top, config))
+            if st.button(f"Use {top['product_id']} as fixed market"):
+                settings["product_id"] = top["product_id"]
+                settings["auto_select_market"] = False
+                save_settings(storage, control_state, settings)
+                st.rerun()
+        else:
+            st.info("Add markets to the watchlist to see AI rankings.")
 
 with overview_tab:
     left, right = st.columns([2.15, 1])
     with left:
-        st.subheader("Market Price")
+        st.subheader(f"{active_product_id} Price")
         if not candles.empty:
             chart_frame = candles.set_index("time")[["close"]].rename(columns={"close": "Close"})
             st.line_chart(chart_frame, use_container_width=True, height=360)
@@ -492,6 +569,8 @@ with signal_tab:
     rules = pd.DataFrame(
         [
             {"rule": "Strategy", "value": settings["strategy_profile"]},
+            {"rule": "Autonomous market selection", "value": "On" if config.auto_select_market else "Off"},
+            {"rule": "Watchlist", "value": ", ".join(config.watchlist)},
             {"rule": "Buy confidence threshold", "value": f"{config.confidence_to_buy:.2%}"},
             {"rule": "Sell confidence threshold", "value": f"{config.confidence_to_sell:.2%}"},
             {"rule": "Stop loss", "value": f"{config.stop_loss_pct:.2%}"},
@@ -568,6 +647,9 @@ with risk_tab:
         st.rerun()
 
     with st.form("risk_settings_form"):
+        new_product_id = st.text_input("Fixed market", value=str(settings.get("product_id") or config.product_id)).upper()
+        new_watchlist = st.text_area("Autonomous watchlist", value=str(settings.get("watchlist") or ",".join(config.watchlist)), height=80)
+        new_auto_select = st.toggle("Let bot choose best watchlist market", value=bool(settings.get("auto_select_market", True)))
         new_max_trade = st.number_input("Max trade USD", min_value=1.0, max_value=100.0, value=float(settings["max_trade_usd"]), step=1.0)
         new_daily_loss = st.number_input("Max daily loss USD", min_value=1.0, max_value=100.0, value=float(settings["max_daily_loss_usd"]), step=1.0)
         new_stop_loss = st.slider("Stop loss", min_value=0.005, max_value=0.20, value=float(settings["stop_loss_pct"]), step=0.005, format="%.3f")
@@ -579,6 +661,9 @@ with risk_tab:
             settings.update(
                 {
                     "strategy_profile": selected_profile,
+                    "product_id": new_product_id,
+                    "watchlist": ",".join(parse_watchlist(new_watchlist)),
+                    "auto_select_market": new_auto_select,
                     "max_trade_usd": new_max_trade,
                     "max_daily_loss_usd": new_daily_loss,
                     "stop_loss_pct": new_stop_loss,

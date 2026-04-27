@@ -17,6 +17,7 @@ STATE_IDS = {"paper": DATA_DIR / "paper_state.json", "live": DATA_DIR / "live_st
 DEFAULT_STATE = {
     "cash_usd": 100.0,
     "base_size": 0.0,
+    "product_id": None,
     "entry_price": None,
     "realized_pnl": 0.0,
     "total_fees": 0.0,

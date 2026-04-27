@@ -26,6 +26,11 @@ def _secret_float(secrets: Any, name: str, default: float) -> float:
         return default
 
 
+def _secret_list(secrets: Any, name: str, default: list[str]) -> list[str]:
+    value = _secret(secrets, name, ",".join(default))
+    return [item.strip().upper() for item in value.split(",") if item.strip()]
+
+
 @dataclass(frozen=True)
 class BotConfig:
     coinbase_api_key: str = ""
@@ -34,6 +39,8 @@ class BotConfig:
     supabase_anon_key: str = ""
     trading_mode: str = "paper"
     product_id: str = "BTC-USD"
+    watchlist: tuple[str, ...] = ("BTC-USD", "ETH-USD", "SOL-USD", "XRP-USD", "DOGE-USD", "ADA-USD", "AVAX-USD", "LINK-USD")
+    auto_select_market: bool = True
     starting_cash: float = 100.0
     max_trade_usd: float = 15.0
     min_trade_usd: float = 5.0
@@ -59,6 +66,8 @@ def load_config(secrets: Any | None = None) -> BotConfig:
         supabase_anon_key=_secret(secrets, "SUPABASE_ANON_KEY"),
         trading_mode=_secret(secrets, "TRADING_MODE", "paper").lower(),
         product_id=_secret(secrets, "PRODUCT_ID", "BTC-USD"),
+        watchlist=tuple(_secret_list(secrets, "WATCHLIST", ["BTC-USD", "ETH-USD", "SOL-USD", "XRP-USD", "DOGE-USD", "ADA-USD", "AVAX-USD", "LINK-USD"])),
+        auto_select_market=_secret(secrets, "AUTO_SELECT_MARKET", "true").lower() in {"1", "true", "yes", "on"},
         starting_cash=_secret_float(secrets, "STARTING_CASH", 100.0),
         max_trade_usd=_secret_float(secrets, "MAX_TRADE_USD", 15.0),
         min_trade_usd=_secret_float(secrets, "MIN_TRADE_USD", 5.0),

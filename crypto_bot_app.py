@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-from dataclasses import replace
 from datetime import datetime, timezone
 from typing import Any
 
@@ -10,7 +9,7 @@ import streamlit as st
 
 from crypto_bot.bot import run_cycle
 from crypto_bot.coinbase_client import CoinbaseClient
-from crypto_bot.config import load_config
+from crypto_bot.config import BotConfig, load_config
 from crypto_bot.market_ai import ai_advice, rank_markets
 from crypto_bot.storage import BotStorage
 from crypto_bot.strategy import score_market
@@ -46,6 +45,8 @@ STRATEGY_PROFILES = {
         "estimated_fee_pct": 0.006,
     },
 }
+
+DEFAULT_WATCHLIST = ("BTC-USD", "ETH-USD", "SOL-USD", "XRP-USD", "DOGE-USD", "ADA-USD", "AVAX-USD", "LINK-USD")
 
 
 def render_css() -> None:
@@ -169,19 +170,20 @@ def heartbeat_status(value: Any) -> tuple[str, str]:
 
 
 def default_settings(config: Any) -> dict[str, Any]:
+    watchlist = getattr(config, "watchlist", DEFAULT_WATCHLIST)
     return {
-        "trading_mode": config.trading_mode,
-        "product_id": config.product_id,
-        "watchlist": ",".join(config.watchlist),
-        "auto_select_market": config.auto_select_market,
+        "trading_mode": getattr(config, "trading_mode", "paper"),
+        "product_id": getattr(config, "product_id", "BTC-USD"),
+        "watchlist": ",".join(watchlist),
+        "auto_select_market": getattr(config, "auto_select_market", True),
         "strategy_profile": "Balanced",
-        "max_trade_usd": config.max_trade_usd,
-        "max_daily_loss_usd": config.max_daily_loss_usd,
-        "stop_loss_pct": config.stop_loss_pct,
-        "take_profit_pct": config.take_profit_pct,
-        "confidence_to_buy": config.confidence_to_buy,
-        "confidence_to_sell": config.confidence_to_sell,
-        "estimated_fee_pct": config.estimated_fee_pct,
+        "max_trade_usd": getattr(config, "max_trade_usd", 15.0),
+        "max_daily_loss_usd": getattr(config, "max_daily_loss_usd", 15.0),
+        "stop_loss_pct": getattr(config, "stop_loss_pct", 0.035),
+        "take_profit_pct": getattr(config, "take_profit_pct", 0.07),
+        "confidence_to_buy": getattr(config, "confidence_to_buy", 0.62),
+        "confidence_to_sell": getattr(config, "confidence_to_sell", 0.54),
+        "estimated_fee_pct": getattr(config, "estimated_fee_pct", 0.006),
     }
 
 
@@ -195,19 +197,26 @@ def save_settings(storage: BotStorage, control_state: dict[str, Any], settings: 
 
 
 def config_with_settings(config: Any, settings: dict[str, Any]) -> Any:
-    return replace(
-        config,
+    watchlist = parse_watchlist(settings.get("watchlist") or ",".join(getattr(config, "watchlist", DEFAULT_WATCHLIST)))
+    return BotConfig(
+        coinbase_api_key=getattr(config, "coinbase_api_key", ""),
+        coinbase_api_secret=getattr(config, "coinbase_api_secret", ""),
+        supabase_url=getattr(config, "supabase_url", ""),
+        supabase_anon_key=getattr(config, "supabase_anon_key", ""),
         trading_mode=str(settings["trading_mode"]).lower(),
-        product_id=str(settings.get("product_id") or config.product_id).upper(),
-        watchlist=tuple(parse_watchlist(settings.get("watchlist") or ",".join(config.watchlist))),
-        auto_select_market=bool(settings.get("auto_select_market", config.auto_select_market)),
+        product_id=str(settings.get("product_id") or getattr(config, "product_id", "BTC-USD")).upper(),
+        watchlist=tuple(watchlist or DEFAULT_WATCHLIST),
+        auto_select_market=bool(settings.get("auto_select_market", getattr(config, "auto_select_market", True))),
+        starting_cash=float(getattr(config, "starting_cash", 100.0)),
         max_trade_usd=float(settings["max_trade_usd"]),
+        min_trade_usd=float(getattr(config, "min_trade_usd", 5.0)),
         max_daily_loss_usd=float(settings["max_daily_loss_usd"]),
         stop_loss_pct=float(settings["stop_loss_pct"]),
         take_profit_pct=float(settings["take_profit_pct"]),
         confidence_to_buy=float(settings["confidence_to_buy"]),
         confidence_to_sell=float(settings["confidence_to_sell"]),
         estimated_fee_pct=float(settings["estimated_fee_pct"]),
+        cycle_seconds=int(getattr(config, "cycle_seconds", 300)),
     )
 
 

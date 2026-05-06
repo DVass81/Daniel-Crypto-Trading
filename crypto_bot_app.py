@@ -416,7 +416,10 @@ def coinbase_portfolio_frame(client: CoinbaseClient) -> pd.DataFrame:
     rows = []
     for account in accounts:
         currency = str(account.get("currency") or account.get("available_currency") or "")
-        amount = float(account.get("available") or 0)
+        available = safe_float(account.get("available"))
+        hold = safe_float(account.get("hold"))
+        total = safe_float(account.get("total"))
+        amount = max(total, available + hold, available)
         if amount <= 0:
             continue
         price = 1.0 if currency == "USD" else 0.0
@@ -425,8 +428,15 @@ def coinbase_portfolio_frame(client: CoinbaseClient) -> pd.DataFrame:
                 price = client.get_spot_price(f"{currency}-USD")
             except Exception:
                 price = 0.0
-        rows.append({"asset": currency, "amount": amount, "price_usd": price, "value_usd": amount * price})
+        rows.append({"asset": currency, "available": available, "hold": hold, "amount": amount, "price_usd": price, "value_usd": amount * price})
     return pd.DataFrame(rows).sort_values("value_usd", ascending=False) if rows else pd.DataFrame()
+
+
+def safe_float(value: Any) -> float:
+    try:
+        return float(value or 0)
+    except (TypeError, ValueError):
+        return 0.0
 
 
 def coinbase_accounts_frame(client: CoinbaseClient) -> pd.DataFrame:
@@ -436,6 +446,8 @@ def coinbase_accounts_frame(client: CoinbaseClient) -> pd.DataFrame:
         return frame
     frame["available"] = pd.to_numeric(frame["available"], errors="coerce").fillna(0)
     frame["hold"] = pd.to_numeric(frame["hold"], errors="coerce").fillna(0)
+    if "total" in frame.columns:
+        frame["total"] = pd.to_numeric(frame["total"], errors="coerce").fillna(frame["available"] + frame["hold"])
     return frame.sort_values("available", ascending=False)
 
 
@@ -710,6 +722,10 @@ elif page == "Portfolio":
             if not ada_rows.empty:
                 st.success("ADA was returned by Coinbase.")
                 st.dataframe(ada_rows, use_container_width=True, hide_index=True)
+                ada_available = safe_float(ada_rows.iloc[0].get("available"))
+                ada_hold = safe_float(ada_rows.iloc[0].get("hold"))
+                ada_total = safe_float(ada_rows.iloc[0].get("total")) if "total" in ada_rows.columns else ada_available + ada_hold
+                st.metric("ADA Total Detected", f"{max(ada_total, ada_available + ada_hold):.8f}")
             else:
                 st.warning("ADA was not returned by Coinbase for this API key/account.")
         else:
@@ -718,7 +734,7 @@ elif page == "Portfolio":
             st.metric("Coinbase Estimated Value", fmt_money(portfolio["value_usd"].sum()))
             st.dataframe(portfolio, use_container_width=True, hide_index=True)
         else:
-            st.warning("Coinbase returned accounts, but no nonzero USD-value balances were found.")
+            st.warning("Coinbase returned accounts, but no nonzero available/held balances were found.")
         with st.expander("All Coinbase account records"):
             if isinstance(accounts_frame, pd.DataFrame) and not accounts_frame.empty:
                 st.dataframe(accounts_frame, use_container_width=True, hide_index=True)

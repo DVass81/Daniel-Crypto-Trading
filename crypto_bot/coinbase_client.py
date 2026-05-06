@@ -42,8 +42,11 @@ class CoinbaseClient:
 
     def get_spot_price(self, product_id: str) -> float:
         if self._client:
-            product = self._client.get_product(product_id)
-            return float(_field(product, "price", 0))
+            try:
+                product = self._client.get_product(product_id)
+                return float(_field(product, "price", 0))
+            except Exception:
+                pass
 
         url = f"https://api.coinbase.com/api/v3/brokerage/market/products/{product_id}"
         data = requests.get(url, timeout=15).json()
@@ -235,13 +238,18 @@ def _to_float(value: Any) -> float:
 def _account_row(account: Any) -> dict[str, Any]:
     balance = _field(account, "available_balance", {})
     hold = _field(account, "hold", {})
+    total_balance = _field(account, "balance", {}) or _field(account, "total_balance", {})
     currency = _field(account, "currency", "")
     available_value = _field(balance, "value", 0)
     available_currency = _field(balance, "currency", currency)
     hold_value = _field(hold, "value", 0)
+    total_value = _field(total_balance, "value", None)
+    if total_value is None:
+        total_value = _to_float(available_value) + _to_float(hold_value)
     return {
         "currency": currency or available_currency,
         "available": available_value,
+        "total": total_value,
         "available_currency": available_currency,
         "hold": hold_value,
         "uuid": _field(account, "uuid", ""),

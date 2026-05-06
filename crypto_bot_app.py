@@ -5,9 +5,14 @@ from datetime import datetime, timezone
 from typing import Any
 
 import pandas as pd
-import plotly.graph_objects as go
 import streamlit as st
-from plotly.subplots import make_subplots
+
+try:
+    import plotly.graph_objects as go
+    from plotly.subplots import make_subplots
+except ModuleNotFoundError:
+    go = None
+    make_subplots = None
 
 from crypto_bot.bot import run_cycle
 from crypto_bot.coinbase_client import CoinbaseClient
@@ -349,6 +354,11 @@ def render_trade_cards(rows: list[dict[str, Any]]) -> None:
 def render_price_chart(candles: pd.DataFrame, product_id: str) -> None:
     if candles.empty:
         st.info("No candle data available yet.")
+        return
+    if go is None or make_subplots is None:
+        chart_data = candles.set_index("time")[["close"]].rename(columns={"close": product_id})
+        st.line_chart(chart_data, use_container_width=True, height=360)
+        st.caption("Install/redeploy with Plotly available to show candlesticks, volume, and RSI panels.")
         return
     chart = candles.copy()
     chart["ema_9"] = chart["close"].ewm(span=9, adjust=False).mean()

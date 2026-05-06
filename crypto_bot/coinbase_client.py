@@ -27,6 +27,7 @@ class CoinbaseClient:
     def __init__(self, config: BotConfig):
         self.config = config
         self._client = None
+        self.init_error = ""
         if config.coinbase_api_key and config.coinbase_api_secret:
             try:
                 from coinbase.rest import RESTClient
@@ -35,13 +36,14 @@ class CoinbaseClient:
                     api_key=config.coinbase_api_key,
                     api_secret=config.coinbase_api_secret,
                 )
-            except Exception:
+            except Exception as exc:
                 self._client = None
+                self.init_error = str(exc)
 
     def get_spot_price(self, product_id: str) -> float:
         if self._client:
             product = self._client.get_product(product_id)
-            return float(_dictish(product).get("price", 0))
+            return float(_field(product, "price", 0))
 
         url = f"https://api.coinbase.com/api/v3/brokerage/market/products/{product_id}"
         data = requests.get(url, timeout=15).json()
@@ -67,23 +69,49 @@ class CoinbaseClient:
         if not self._client:
             return []
         raw = self._client.get_accounts()
-        data = _dictish(raw)
-        accounts = data.get("accounts", raw if isinstance(raw, list) else [])
+        accounts = _field(raw, "accounts", raw if isinstance(raw, list) else [])
         rows = []
         for account in accounts:
-            item = _dictish(account)
-            balance = _dictish(item.get("available_balance", {}))
-            hold = _dictish(item.get("hold", {}))
+            balance = _field(account, "available_balance", {})
+            hold = _field(account, "hold", {})
+            currency = _field(account, "currency", "")
+            available_value = _field(balance, "value", 0)
+            available_currency = _field(balance, "currency", currency)
+            hold_value = _field(hold, "value", 0)
             rows.append(
                 {
-                    "currency": item.get("currency"),
-                    "available": balance.get("value"),
-                    "available_currency": balance.get("currency"),
-                    "hold": hold.get("value"),
-                    "uuid": item.get("uuid"),
+                    "currency": currency or available_currency,
+                    "available": available_value,
+                    "available_currency": available_currency,
+                    "hold": hold_value,
+                    "uuid": _field(account, "uuid", ""),
+                    "name": _field(account, "name", ""),
+                    "type": _field(account, "type", ""),
+                    "ready": _field(account, "ready", None),
+                    "active": _field(account, "active", None),
                 }
             )
         return rows
+
+    def connection_diagnostics(self) -> dict[str, Any]:
+        diagnostics = {
+            "api_key_present": bool(self.config.coinbase_api_key),
+            "api_secret_present": bool(self.config.coinbase_api_secret),
+            "client_initialized": bool(self._client),
+            "init_error": self.init_error,
+            "account_count": 0,
+            "nonzero_account_count": 0,
+            "account_error": "",
+        }
+        if not self._client:
+            return diagnostics
+        try:
+            accounts = self.get_accounts()
+            diagnostics["account_count"] = len(accounts)
+            diagnostics["nonzero_account_count"] = sum(1 for account in accounts if _to_float(account.get("available")) > 0)
+        except Exception as exc:
+            diagnostics["account_error"] = str(exc)
+        return diagnostics
 
     def get_available_balances(self) -> dict[str, float]:
         balances: dict[str, float] = {}
@@ -166,6 +194,22 @@ def _dictish(value: Any) -> dict[str, Any]:
         return dict(value)
     except Exception:
         return {}
+
+
+def _field(value: Any, name: str, default: Any = None) -> Any:
+    if isinstance(value, dict):
+        return value.get(name, default)
+    if hasattr(value, name):
+        return getattr(value, name)
+    data = _dictish(value)
+    return data.get(name, default)
+
+
+def _to_float(value: Any) -> float:
+    try:
+        return float(value or 0)
+    except (TypeError, ValueError):
+        return 0.0
 
 
 def _product_row(value: Any) -> dict[str, Any]:

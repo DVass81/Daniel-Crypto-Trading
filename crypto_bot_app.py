@@ -429,6 +429,16 @@ def coinbase_portfolio_frame(client: CoinbaseClient) -> pd.DataFrame:
     return pd.DataFrame(rows).sort_values("value_usd", ascending=False) if rows else pd.DataFrame()
 
 
+def coinbase_accounts_frame(client: CoinbaseClient) -> pd.DataFrame:
+    accounts = client.get_accounts()
+    frame = pd.DataFrame(accounts)
+    if frame.empty:
+        return frame
+    frame["available"] = pd.to_numeric(frame["available"], errors="coerce").fillna(0)
+    frame["hold"] = pd.to_numeric(frame["hold"], errors="coerce").fillna(0)
+    return frame.sort_values("available", ascending=False)
+
+
 def action_tone(action: str) -> str:
     action = action.upper()
     if action == "BUY":
@@ -453,6 +463,7 @@ active_product_id = state.get("product_id") or config.product_id
 
 coinbase_configured = bool(config.coinbase_api_key and config.coinbase_api_secret)
 coinbase_client_ready = bool(client._client)
+coinbase_diagnostics = client.connection_diagnostics()
 supabase_connected = bool(storage._supabase)
 halted = bool(state.get("halted"))
 heartbeat_text, heartbeat_tone = heartbeat_status(state.get("last_cycle_at"))
@@ -483,7 +494,7 @@ status_html = [
     badge(f"Market: {active_product_id}", "neutral"),
     badge("Auto-select on" if config.auto_select_market else "Fixed market", "good" if config.auto_select_market else "neutral"),
     badge("Coinbase key loaded" if coinbase_configured else "Coinbase key missing", "good" if coinbase_configured else "warn"),
-    badge("Coinbase SDK ready" if coinbase_client_ready else "Public market data only", "good" if coinbase_client_ready else "warn"),
+    badge("Coinbase SDK ready" if coinbase_client_ready else "Coinbase SDK not ready", "good" if coinbase_client_ready else "warn"),
     badge("Supabase connected" if supabase_connected else "Local fallback storage", "good" if supabase_connected else "warn"),
     badge(heartbeat_text, heartbeat_tone),
 ]
@@ -671,17 +682,36 @@ elif page == "Trade":
 
 elif page == "Portfolio":
     st.subheader("Portfolio")
-    if coinbase_client_ready:
-        if st.button("Sync Coinbase Portfolio", type="primary"):
-            st.session_state["coinbase_portfolio"] = coinbase_portfolio_frame(client)
+    diag_cols = st.columns(4)
+    diag_cols[0].metric("Coinbase Client", "Ready" if coinbase_client_ready else "Not Ready")
+    diag_cols[1].metric("Accounts", coinbase_diagnostics.get("account_count", 0))
+    diag_cols[2].metric("Nonzero Accounts", coinbase_diagnostics.get("nonzero_account_count", 0))
+    diag_cols[3].metric("Key Loaded", "Yes" if coinbase_configured else "No")
+
+    if not coinbase_client_ready:
+        st.error("Coinbase client is not ready. Check COINBASE_API_KEY and COINBASE_API_SECRET in Streamlit secrets.")
+        if coinbase_diagnostics.get("init_error"):
+            st.code(str(coinbase_diagnostics["init_error"]))
+    else:
+        refresh = st.button("Refresh Coinbase Balances", type="primary")
+        if refresh or "coinbase_accounts" not in st.session_state:
+            try:
+                st.session_state["coinbase_accounts"] = coinbase_accounts_frame(client)
+                st.session_state["coinbase_portfolio"] = coinbase_portfolio_frame(client)
+            except Exception as exc:
+                st.error(f"Coinbase balance sync failed: {exc}")
+        accounts_frame = st.session_state.get("coinbase_accounts", pd.DataFrame())
         portfolio = st.session_state.get("coinbase_portfolio", pd.DataFrame())
         if isinstance(portfolio, pd.DataFrame) and not portfolio.empty:
-            st.metric("Coinbase Portfolio Value", fmt_money(portfolio["value_usd"].sum()))
+            st.metric("Coinbase Estimated Value", fmt_money(portfolio["value_usd"].sum()))
             st.dataframe(portfolio, use_container_width=True, hide_index=True)
         else:
-            st.info("Click sync to load real Coinbase balances.")
-    else:
-        st.warning("Coinbase client is not ready. Check Streamlit secrets formatting.")
+            st.warning("Coinbase returned accounts, but no nonzero USD-value balances were found.")
+        with st.expander("All Coinbase account records"):
+            if isinstance(accounts_frame, pd.DataFrame) and not accounts_frame.empty:
+                st.dataframe(accounts_frame, use_container_width=True, hide_index=True)
+            else:
+                st.info("No account records returned by Coinbase.")
     st.subheader("Bot State Portfolio")
     st.dataframe(pd.DataFrame([{"mode": state_id, "market": active_product_id, "cash": cash, "base_size": base, "equity": equity, "realized_pnl": realized_pnl}]), use_container_width=True, hide_index=True)
 
@@ -776,6 +806,8 @@ elif page == "Settings":
         {"item": "Supabase", "status": "Connected" if supabase_connected else "Fallback/local"},
         {"item": "Coinbase API key", "status": "Configured" if config.coinbase_api_key else "Missing"},
         {"item": "Coinbase private key", "status": "Configured" if config.coinbase_api_secret else "Missing"},
+        {"item": "Coinbase client", "status": "Ready" if coinbase_client_ready else f"Not ready: {coinbase_diagnostics.get('init_error') or 'unknown'}"},
+        {"item": "Coinbase accounts", "status": str(coinbase_diagnostics.get("account_count", 0))},
         {"item": "Trading mode", "status": config.trading_mode.upper()},
         {"item": "Runner heartbeat", "status": heartbeat_text},
     ])

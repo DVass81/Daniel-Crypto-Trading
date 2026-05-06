@@ -32,6 +32,25 @@ def rank_markets(client: CoinbaseClient, config: BotConfig, products: list[str] 
     return sorted(rows, key=lambda row: float(row.get("ai_score", 0)), reverse=True)
 
 
+def rank_all_usd_markets(client: CoinbaseClient, config: BotConfig, limit: int | None = None) -> list[dict[str, Any]]:
+    max_scan = int(limit or config.scan_market_limit)
+    try:
+        products = client.get_products(limit=250)
+    except Exception:
+        products = []
+    candidates = []
+    for product in products:
+        if product.get("quote_currency_id") != "USD" or product.get("trading_disabled"):
+            continue
+        try:
+            volume = float(product.get("volume_24h") or 0)
+        except (TypeError, ValueError):
+            volume = 0.0
+        candidates.append((str(product.get("product_id") or ""), volume))
+    product_ids = [product_id for product_id, _ in sorted(candidates, key=lambda item: item[1], reverse=True) if product_id]
+    return rank_markets(client, config, products=product_ids[:max_scan], limit=max_scan)
+
+
 def best_buy_candidate(client: CoinbaseClient, config: BotConfig) -> dict[str, Any] | None:
     ranked = rank_markets(client, config, limit=len(config.watchlist))
     for row in ranked:
@@ -69,6 +88,7 @@ def _rank_row(product_id: str, signal: Signal, candles: pd.DataFrame) -> dict[st
         "reason": signal.reason,
         **{f"metric_{key}": value for key, value in metrics.items()},
     }
+    row["risk_level"] = _risk_level(metrics)
     row["advice"] = _plain_advice(row)
     return row
 
@@ -79,3 +99,16 @@ def _plain_advice(row: dict[str, Any]) -> str:
     if row["action"] == "SELL":
         return "Risk-off signal. Avoid new buys or protect an open position."
     return "No strong edge. Watch and wait."
+
+
+def _risk_level(metrics: dict[str, float]) -> str:
+    volatility = float(metrics.get("volatility_20", 0) or 0)
+    atr = float(metrics.get("atr", 0) or 0)
+    price = float(metrics.get("ema_fast", 0) or 0)
+    atr_pct = atr / price if price else 0
+    combined = max(volatility, atr_pct)
+    if combined >= 0.045:
+        return "High"
+    if combined >= 0.02:
+        return "Medium"
+    return "Low"

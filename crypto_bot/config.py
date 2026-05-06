@@ -50,6 +50,8 @@ class BotConfig:
     confidence_to_buy: float = 0.62
     confidence_to_sell: float = 0.54
     estimated_fee_pct: float = 0.006
+    scan_market_limit: int = 40
+    notification_webhook_url: str = ""
     cycle_seconds: int = 300
 
     @property
@@ -77,6 +79,8 @@ def load_config(secrets: Any | None = None) -> BotConfig:
         confidence_to_buy=_secret_float(secrets, "CONFIDENCE_TO_BUY", 0.62),
         confidence_to_sell=_secret_float(secrets, "CONFIDENCE_TO_SELL", 0.54),
         estimated_fee_pct=_secret_float(secrets, "ESTIMATED_FEE_PCT", 0.006),
+        scan_market_limit=int(_secret_float(secrets, "SCAN_MARKET_LIMIT", 40)),
+        notification_webhook_url=_secret(secrets, "NOTIFICATION_WEBHOOK_URL"),
         cycle_seconds=int(_secret_float(secrets, "CYCLE_SECONDS", 300)),
     )
 

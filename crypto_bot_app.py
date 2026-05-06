@@ -5,12 +5,14 @@ from datetime import datetime, timezone
 from typing import Any
 
 import pandas as pd
+import plotly.graph_objects as go
 import streamlit as st
+from plotly.subplots import make_subplots
 
 from crypto_bot.bot import run_cycle
 from crypto_bot.coinbase_client import CoinbaseClient
 from crypto_bot.config import BotConfig, load_config
-from crypto_bot.market_ai import ai_advice, rank_markets
+from crypto_bot.market_ai import ai_advice, rank_all_usd_markets, rank_markets
 from crypto_bot.storage import BotStorage
 from crypto_bot.strategy import score_market
 
@@ -184,6 +186,7 @@ def default_settings(config: Any) -> dict[str, Any]:
         "confidence_to_buy": getattr(config, "confidence_to_buy", 0.62),
         "confidence_to_sell": getattr(config, "confidence_to_sell", 0.54),
         "estimated_fee_pct": getattr(config, "estimated_fee_pct", 0.006),
+        "scan_market_limit": getattr(config, "scan_market_limit", 40),
     }
 
 
@@ -216,6 +219,8 @@ def config_with_settings(config: Any, settings: dict[str, Any]) -> Any:
         confidence_to_buy=float(settings["confidence_to_buy"]),
         confidence_to_sell=float(settings["confidence_to_sell"]),
         estimated_fee_pct=float(settings["estimated_fee_pct"]),
+        scan_market_limit=int(settings.get("scan_market_limit", getattr(config, "scan_market_limit", 40))),
+        notification_webhook_url=getattr(config, "notification_webhook_url", ""),
         cycle_seconds=int(getattr(config, "cycle_seconds", 300)),
     )
 
@@ -339,6 +344,88 @@ def render_trade_cards(rows: list[dict[str, Any]]) -> None:
             """,
             unsafe_allow_html=True,
         )
+
+
+def render_price_chart(candles: pd.DataFrame, product_id: str) -> None:
+    if candles.empty:
+        st.info("No candle data available yet.")
+        return
+    chart = candles.copy()
+    chart["ema_9"] = chart["close"].ewm(span=9, adjust=False).mean()
+    chart["ema_21"] = chart["close"].ewm(span=21, adjust=False).mean()
+    chart["volume"] = pd.to_numeric(chart.get("volume", 0), errors="coerce")
+    delta = chart["close"].diff()
+    gain = delta.clip(lower=0).rolling(14).mean()
+    loss = (-delta.clip(upper=0)).rolling(14).mean()
+    rs = gain / loss.replace(0, pd.NA)
+    chart["rsi"] = 100 - (100 / (1 + rs))
+
+    fig = make_subplots(
+        rows=3,
+        cols=1,
+        shared_xaxes=True,
+        row_heights=[0.64, 0.18, 0.18],
+        vertical_spacing=0.035,
+        specs=[[{"type": "candlestick"}], [{"type": "bar"}], [{"type": "scatter"}]],
+    )
+    fig.add_trace(
+        go.Candlestick(
+            x=chart["time"],
+            open=chart["open"],
+            high=chart["high"],
+            low=chart["low"],
+            close=chart["close"],
+            name=product_id,
+            increasing_line_color="#34c77b",
+            decreasing_line_color="#ff6b6b",
+        ),
+        row=1,
+        col=1,
+    )
+    fig.add_trace(go.Scatter(x=chart["time"], y=chart["ema_9"], name="EMA 9", line={"color": "#6fb7ff", "width": 1.4}), row=1, col=1)
+    fig.add_trace(go.Scatter(x=chart["time"], y=chart["ema_21"], name="EMA 21", line={"color": "#ffd166", "width": 1.4}), row=1, col=1)
+    fig.add_trace(go.Bar(x=chart["time"], y=chart["volume"], name="Volume", marker_color="#30465d"), row=2, col=1)
+    fig.add_trace(go.Scatter(x=chart["time"], y=chart["rsi"], name="RSI", line={"color": "#b794f4", "width": 1.4}), row=3, col=1)
+    fig.add_hline(y=70, line_dash="dot", line_color="#ff8a80", row=3, col=1)
+    fig.add_hline(y=30, line_dash="dot", line_color="#78e0a0", row=3, col=1)
+    fig.update_layout(
+        height=620,
+        template="plotly_dark",
+        paper_bgcolor="#070d14",
+        plot_bgcolor="#0a111a",
+        margin={"l": 10, "r": 10, "t": 30, "b": 10},
+        xaxis_rangeslider_visible=False,
+        legend_orientation="h",
+        legend_y=1.04,
+    )
+    st.plotly_chart(fig, use_container_width=True)
+
+
+def coinbase_portfolio_frame(client: CoinbaseClient) -> pd.DataFrame:
+    accounts = client.get_accounts()
+    rows = []
+    for account in accounts:
+        currency = str(account.get("currency") or account.get("available_currency") or "")
+        amount = float(account.get("available") or 0)
+        if amount <= 0:
+            continue
+        price = 1.0 if currency == "USD" else 0.0
+        if currency != "USD":
+            try:
+                price = client.get_spot_price(f"{currency}-USD")
+            except Exception:
+                price = 0.0
+        rows.append({"asset": currency, "amount": amount, "price_usd": price, "value_usd": amount * price})
+    return pd.DataFrame(rows).sort_values("value_usd", ascending=False) if rows else pd.DataFrame()
+
+
+def action_tone(action: str) -> str:
+    action = action.upper()
+    if action == "BUY":
+        return "good"
+    if action == "SELL":
+        return "bad"
+    return "neutral"
 
 
 render_css()
@@ -485,41 +572,67 @@ signal = score_market(
 )
 preview = order_preview(signal, state, config)
 
-market_tab, overview_tab, signal_tab, events_tab, risk_tab, account_tab, runner_tab = st.tabs(
-    ["Markets", "Overview", "Signal", "Events", "Risk", "Coinbase", "Runner"]
+page = st.sidebar.radio(
+    "Navigation",
+    ["Home", "Markets", "Trade", "Portfolio", "AI Center", "Activity", "Settings"],
+    label_visibility="collapsed",
 )
 
-with market_tab:
-    st.subheader("Market Browser")
-    c1, c2 = st.columns([1.3, 1])
-    with c1:
-        market_rows = load_market_rows(client)
-        search = st.text_input("Search markets", value="")
+rows = [flatten_event(item) for item in events if (item.get("payload") or {}).get("mode") in {state_id, None}]
+
+if page == "Home":
+    st.subheader("Portfolio Home")
+    home_left, home_right = st.columns([1.6, 1])
+    with home_left:
+        render_price_chart(candles, active_product_id)
+    with home_right:
+        with st.spinner("Building AI recommendation..."):
+            watch_rankings = rank_markets(client, config, limit=min(8, len(config.watchlist)))
+        top = watch_rankings[0] if watch_rankings else None
+        st.markdown('<div class="panel">', unsafe_allow_html=True)
+        st.subheader("AI Recommendation Center")
+        if top:
+            st.markdown(f'<div class="status-row">{badge(top["action"], action_tone(top["action"]))}{badge(top.get("risk_level", "Risk unknown"), "warn" if top.get("risk_level") == "High" else "neutral")}</div>', unsafe_allow_html=True)
+            st.metric("Best Opportunity", top["product_id"])
+            st.metric("AI Score", f"{float(top['ai_score']):.2%}")
+            st.write(ai_advice(top, config))
+            st.caption(top.get("reason", ""))
+        else:
+            st.info("No AI ranking available yet.")
+        st.markdown("</div>", unsafe_allow_html=True)
+
+        st.subheader("What The Bot Will Do")
+        if preview:
+            st.dataframe(pd.DataFrame([preview]), use_container_width=True, hide_index=True)
+        else:
+            st.info("The current signal does not meet trade rules.")
+
+    history_frame = equity_history(events, state_id, config.starting_cash)
+    if not history_frame.empty:
+        st.subheader(f"{state_id.title()} Equity")
+        st.line_chart(history_frame.set_index("time"), use_container_width=True, height=220)
+
+elif page == "Markets":
+    st.subheader("Markets")
+    market_rows = load_market_rows(client)
+    search = st.text_input("Search markets", value="")
+    left, right = st.columns([1.25, 1])
+    with left:
         if not market_rows.empty:
             visible = market_rows.copy()
             if search:
                 visible = visible[visible["product_id"].str.contains(search.upper(), na=False)]
-            display_cols = ["product_id", "price", "price_percentage_change_24h", "volume_24h", "status"]
-            st.dataframe(
-                visible[display_cols].head(80),
-                use_container_width=True,
-                hide_index=True,
-            )
+            st.dataframe(visible[["product_id", "price", "price_percentage_change_24h", "volume_24h", "status"]].head(120), use_container_width=True, hide_index=True)
         else:
             st.warning("Coinbase market list is unavailable right now.")
-    with c2:
-        st.subheader("AI Watchlist Rankings")
-        with st.spinner("Scoring watchlist markets..."):
-            rankings = rank_markets(client, config, limit=min(12, len(config.watchlist)))
+    with right:
+        scan_all = st.toggle("Scan top USD markets", value=True)
+        with st.spinner("AI is scanning markets..."):
+            rankings = rank_all_usd_markets(client, config, limit=config.scan_market_limit) if scan_all else rank_markets(client, config, limit=min(12, len(config.watchlist)))
         if rankings:
             ranking_frame = pd.DataFrame(rankings)
-            st.dataframe(
-                ranking_frame[["product_id", "action", "confidence", "ai_score", "price", "advice"]],
-                use_container_width=True,
-                hide_index=True,
-            )
+            st.dataframe(ranking_frame[["product_id", "action", "confidence", "ai_score", "risk_level", "price", "advice"]], use_container_width=True, hide_index=True)
             top = rankings[0]
-            st.markdown(f"**Top AI read:** `{top['product_id']}` - `{top['action']}` - confidence `{float(top['confidence']):.2%}`")
             st.write(ai_advice(top, config))
             if st.button(f"Use {top['product_id']} as fixed market"):
                 settings["product_id"] = top["product_id"]
@@ -527,100 +640,75 @@ with market_tab:
                 save_settings(storage, control_state, settings)
                 st.rerun()
         else:
-            st.info("Add markets to the watchlist to see AI rankings.")
+            st.info("No markets could be ranked.")
 
-with overview_tab:
-    left, right = st.columns([2.15, 1])
+elif page == "Trade":
+    st.subheader(f"Trade: {active_product_id}")
+    left, right = st.columns([2, 1])
     with left:
-        st.subheader(f"{active_product_id} Price")
-        if not candles.empty:
-            chart_frame = candles.set_index("time")[["close"]].rename(columns={"close": "Close"})
-            st.line_chart(chart_frame, use_container_width=True, height=360)
-        else:
-            st.info("No candle data available yet.")
-
-        history_frame = equity_history(events, state_id, config.starting_cash)
-        if not history_frame.empty:
-            st.subheader(f"{state_id.title()} Equity Timeline")
-            st.line_chart(history_frame.set_index("time"), use_container_width=True, height=220)
-        else:
-            st.info("Equity timeline appears after bot cycles are logged.")
-
+        render_price_chart(candles, active_product_id)
     with right:
-        st.subheader("Current Decision")
-        st.markdown('<div class="panel">', unsafe_allow_html=True)
-        st.metric("Action", signal.action)
+        st.metric("AI Action", signal.action)
         st.metric("Confidence", f"{signal.confidence:.2%}")
         st.write(signal.reason)
-        st.markdown("</div>", unsafe_allow_html=True)
-
-        st.subheader("Live Order Preview")
         if preview:
+            st.subheader("Trade Ticket")
             st.dataframe(pd.DataFrame([preview]), use_container_width=True, hide_index=True)
-            if config.live_enabled:
-                st.warning("This is the kind of order the next eligible live cycle may attempt.")
         else:
-            st.info("No eligible order preview from the current signal.")
-
-        st.subheader("Position")
+            st.info("No eligible trade ticket.")
         st.metric("Entry Price", fmt_money(entry_price) if entry_price else "No open entry")
         st.metric("Unrealized P/L", fmt_money(unrealized_pnl), f"{((price / entry_price - 1) * 100):+.2f}%" if entry_price and price else None)
 
-with signal_tab:
-    st.subheader("Signal Score Breakdown")
-    metric_rows = [{"metric": key, "value": value} for key, value in signal.metrics.items()]
-    if metric_rows:
-        st.dataframe(metric_rows, use_container_width=True, hide_index=True)
+elif page == "Portfolio":
+    st.subheader("Portfolio")
+    if coinbase_client_ready:
+        if st.button("Sync Coinbase Portfolio", type="primary"):
+            st.session_state["coinbase_portfolio"] = coinbase_portfolio_frame(client)
+        portfolio = st.session_state.get("coinbase_portfolio", pd.DataFrame())
+        if isinstance(portfolio, pd.DataFrame) and not portfolio.empty:
+            st.metric("Coinbase Portfolio Value", fmt_money(portfolio["value_usd"].sum()))
+            st.dataframe(portfolio, use_container_width=True, hide_index=True)
+        else:
+            st.info("Click sync to load real Coinbase balances.")
     else:
-        st.info("Signal metrics will appear after enough candle history is available.")
+        st.warning("Coinbase client is not ready. Check Streamlit secrets formatting.")
+    st.subheader("Bot State Portfolio")
+    st.dataframe(pd.DataFrame([{"mode": state_id, "market": active_product_id, "cash": cash, "base_size": base, "equity": equity, "realized_pnl": realized_pnl}]), use_container_width=True, hide_index=True)
 
-    st.subheader("Bot Rules")
-    rules = pd.DataFrame(
-        [
-            {"rule": "Strategy", "value": settings["strategy_profile"]},
-            {"rule": "Autonomous market selection", "value": "On" if config.auto_select_market else "Off"},
-            {"rule": "Watchlist", "value": ", ".join(config.watchlist)},
-            {"rule": "Buy confidence threshold", "value": f"{config.confidence_to_buy:.2%}"},
-            {"rule": "Sell confidence threshold", "value": f"{config.confidence_to_sell:.2%}"},
-            {"rule": "Stop loss", "value": f"{config.stop_loss_pct:.2%}"},
-            {"rule": "Take profit", "value": f"{config.take_profit_pct:.2%}"},
-            {"rule": "Estimated fee", "value": f"{config.estimated_fee_pct:.2%}"},
-            {"rule": "Minimum trade", "value": fmt_money(config.min_trade_usd)},
-            {"rule": "Maximum trade", "value": fmt_money(config.max_trade_usd)},
-        ]
-    )
-    st.dataframe(rules, use_container_width=True, hide_index=True)
+elif page == "AI Center":
+    st.subheader("AI Recommendation Center")
+    with st.spinner("Scoring market intelligence..."):
+        rankings = rank_all_usd_markets(client, config, limit=config.scan_market_limit)
+    if rankings:
+        top = rankings[0]
+        st.markdown(f'<div class="status-row">{badge(top["product_id"], "neutral")}{badge(top["action"], action_tone(top["action"]))}{badge(top.get("risk_level", "Risk unknown"), "warn" if top.get("risk_level") == "High" else "good")}</div>', unsafe_allow_html=True)
+        cols = st.columns(4)
+        cols[0].metric("Top Market", top["product_id"])
+        cols[1].metric("AI Score", f"{float(top['ai_score']):.2%}")
+        cols[2].metric("Confidence", f"{float(top['confidence']):.2%}")
+        cols[3].metric("Risk", top.get("risk_level", "Unknown"))
+        st.write(ai_advice(top, config))
+        st.dataframe(pd.DataFrame(rankings)[["product_id", "action", "confidence", "ai_score", "risk_level", "metric_rsi", "metric_macd_hist", "metric_bollinger_width", "advice"]], use_container_width=True, hide_index=True)
+    else:
+        st.info("No AI rankings available.")
 
-with events_tab:
-    st.subheader("Trade Cards")
-    rows = [flatten_event(item) for item in events if (item.get("payload") or {}).get("mode") in {state_id, None}]
+elif page == "Activity":
+    st.subheader("Activity Timeline")
     render_trade_cards(rows)
-
-    st.subheader("Bot Event History")
+    notifications = [flatten_event(item) for item in events if item.get("kind") in {"notification", "notification_error"}]
+    if notifications:
+        st.subheader("Notifications")
+        st.dataframe(pd.DataFrame(notifications), use_container_width=True, hide_index=True)
+    st.subheader("Event History")
     if rows:
-        event_frame = pd.DataFrame(rows)
-        actions = sorted([value for value in event_frame["action"].dropna().unique()])
-        kinds = sorted([value for value in event_frame["kind"].dropna().unique()])
-        c1, c2 = st.columns(2)
-        selected_actions = c1.multiselect("Filter by action", actions, default=actions)
-        selected_kinds = c2.multiselect("Filter by kind", kinds, default=kinds)
-        if selected_actions:
-            event_frame = event_frame[event_frame["action"].isin(selected_actions)]
-        if selected_kinds:
-            event_frame = event_frame[event_frame["kind"].isin(selected_kinds)]
-        st.dataframe(event_frame, use_container_width=True, hide_index=True)
+        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
     else:
-        st.info("No events logged yet. Run one bot cycle to create the first record.")
-
+        st.info("No events logged yet.")
     st.subheader("P/L Heatmap")
     render_heatmap(daily_pnl(events, state_id, config.starting_cash))
 
-    if "last_result" in st.session_state:
-        with st.expander("Last Cycle Payload"):
-            st.json(st.session_state["last_result"])
-
-with risk_tab:
-    st.subheader("Risk Dashboard")
+elif page == "Settings":
+    st.subheader("Risk And Automation Settings")
     risk_cols = st.columns(5)
     risk_cols[0].metric("Daily Loss Used", fmt_money(daily_loss_used))
     risk_cols[1].metric("Daily Loss Limit", fmt_money(config.max_daily_loss_usd))
@@ -629,27 +717,7 @@ with risk_tab:
     risk_cols[4].metric("Halt Status", "Halted" if halted else "Active")
     st.progress(daily_loss_ratio, text=f"Daily loss usage: {daily_loss_ratio:.0%}")
 
-    warnings = []
-    if config.live_enabled:
-        warnings.append("Live trading is enabled. Keep trade size small and monitor order logs.")
-    if config.max_trade_usd > config.starting_cash * 0.25:
-        warnings.append("Max trade size is more than 25% of starting cash.")
-    if not supabase_connected:
-        warnings.append("Supabase is not connected, so cloud logs may not persist.")
-    if not coinbase_client_ready and coinbase_configured:
-        warnings.append("Coinbase credentials are present but the SDK client did not initialize.")
-    if warnings:
-        for warning in warnings:
-            st.warning(warning)
-    else:
-        st.success("Risk settings look reasonable for paper testing.")
-
-    st.subheader("Runtime Settings")
-    selected_profile = st.selectbox(
-        "Strategy profile",
-        list(STRATEGY_PROFILES),
-        index=list(STRATEGY_PROFILES).index(str(settings.get("strategy_profile", "Balanced"))),
-    )
+    selected_profile = st.selectbox("Strategy profile", list(STRATEGY_PROFILES), index=list(STRATEGY_PROFILES).index(str(settings.get("strategy_profile", "Balanced"))))
     if selected_profile != settings.get("strategy_profile"):
         settings = {**settings, "strategy_profile": selected_profile, **STRATEGY_PROFILES[selected_profile]}
         save_settings(storage, control_state, settings)
@@ -659,6 +727,7 @@ with risk_tab:
         new_product_id = st.text_input("Fixed market", value=str(settings.get("product_id") or config.product_id)).upper()
         new_watchlist = st.text_area("Autonomous watchlist", value=str(settings.get("watchlist") or ",".join(config.watchlist)), height=80)
         new_auto_select = st.toggle("Let bot choose best watchlist market", value=bool(settings.get("auto_select_market", True)))
+        new_scan_limit = st.number_input("Top USD markets to scan", min_value=5, max_value=100, value=int(settings.get("scan_market_limit", config.scan_market_limit)), step=5)
         new_max_trade = st.number_input("Max trade USD", min_value=1.0, max_value=100.0, value=float(settings["max_trade_usd"]), step=1.0)
         new_daily_loss = st.number_input("Max daily loss USD", min_value=1.0, max_value=100.0, value=float(settings["max_daily_loss_usd"]), step=1.0)
         new_stop_loss = st.slider("Stop loss", min_value=0.005, max_value=0.20, value=float(settings["stop_loss_pct"]), step=0.005, format="%.3f")
@@ -667,21 +736,20 @@ with risk_tab:
         new_sell_conf = st.slider("Sell confidence", min_value=0.40, max_value=0.95, value=float(settings["confidence_to_sell"]), step=0.01)
         new_fee = st.slider("Estimated Coinbase fee", min_value=0.0, max_value=0.02, value=float(settings["estimated_fee_pct"]), step=0.001, format="%.3f")
         if st.form_submit_button("Save Runtime Settings", type="primary"):
-            settings.update(
-                {
-                    "strategy_profile": selected_profile,
-                    "product_id": new_product_id,
-                    "watchlist": ",".join(parse_watchlist(new_watchlist)),
-                    "auto_select_market": new_auto_select,
-                    "max_trade_usd": new_max_trade,
-                    "max_daily_loss_usd": new_daily_loss,
-                    "stop_loss_pct": new_stop_loss,
-                    "take_profit_pct": new_take_profit,
-                    "confidence_to_buy": new_buy_conf,
-                    "confidence_to_sell": new_sell_conf,
-                    "estimated_fee_pct": new_fee,
-                }
-            )
+            settings.update({
+                "strategy_profile": selected_profile,
+                "product_id": new_product_id,
+                "watchlist": ",".join(parse_watchlist(new_watchlist)),
+                "auto_select_market": new_auto_select,
+                "scan_market_limit": new_scan_limit,
+                "max_trade_usd": new_max_trade,
+                "max_daily_loss_usd": new_daily_loss,
+                "stop_loss_pct": new_stop_loss,
+                "take_profit_pct": new_take_profit,
+                "confidence_to_buy": new_buy_conf,
+                "confidence_to_sell": new_sell_conf,
+                "estimated_fee_pct": new_fee,
+            })
             save_settings(storage, control_state, settings)
             st.success("Settings saved.")
             st.rerun()
@@ -693,56 +761,12 @@ with risk_tab:
         storage.log_event("paper_reset", {"mode": "paper", "reason": "Operator reset from dashboard."})
         st.rerun()
 
-with account_tab:
-    st.subheader("Coinbase Balance Sync")
-    if not coinbase_client_ready:
-        st.warning("Coinbase client is not ready. Check Streamlit secrets formatting.")
-    elif st.button("Refresh Coinbase Balances", type="primary"):
-        try:
-            accounts = client.get_accounts()
-            if accounts:
-                balances = pd.DataFrame(accounts)
-                st.success(f"Coinbase read access works. Returned {len(balances)} account records.")
-                st.dataframe(balances, use_container_width=True, hide_index=True)
-            else:
-                st.warning("Coinbase connected, but returned no account records.")
-        except Exception as exc:
-            st.error(f"Coinbase balance read failed: {exc}")
-
-    st.subheader("Permission Check")
-    permission_rows = [
-        {"check": "API key present", "status": "Pass" if config.coinbase_api_key else "Missing"},
-        {"check": "Private key present", "status": "Pass" if config.coinbase_api_secret else "Missing"},
-        {"check": "SDK client initialized", "status": "Pass" if coinbase_client_ready else "Fail"},
-        {"check": "Read permission", "status": "Use balance refresh to verify"},
-        {"check": "Trade permission", "status": "Only confirmed by an order attempt; do not enable transfer permissions"},
-    ]
-    st.dataframe(pd.DataFrame(permission_rows), use_container_width=True, hide_index=True)
-
-with runner_tab:
-    st.subheader("Always-On Runner")
-    st.markdown(f'<div class="status-row">{badge(heartbeat_text, heartbeat_tone)}</div>', unsafe_allow_html=True)
-    runner_rows = pd.DataFrame(
-        [
-            {"item": "Active state", "value": state_id},
-            {"item": "Last cycle", "value": parse_time(state.get("last_cycle_at"))},
-            {"item": "Last action", "value": state.get("last_action") or "None"},
-            {"item": "Last error", "value": json.dumps(state.get("last_error"), default=str) if state.get("last_error") else "None"},
-            {"item": "Background command", "value": "python crypto_bot_runner.py"},
-        ]
-    )
-    st.dataframe(runner_rows, use_container_width=True, hide_index=True)
-    st.info("Streamlit is the dashboard. For true 24/7 trading, run crypto_bot_runner.py on an always-on host such as Render, Railway, Fly.io, or a small VPS.")
-
     st.subheader("Deployment Health")
-    health = pd.DataFrame(
-        [
-            {"item": "Supabase", "status": "Connected" if supabase_connected else "Fallback/local"},
-            {"item": "Coinbase API key", "status": "Configured" if config.coinbase_api_key else "Missing"},
-            {"item": "Coinbase private key", "status": "Configured" if config.coinbase_api_secret else "Missing"},
-            {"item": "Trading mode", "status": config.trading_mode.upper()},
-            {"item": "Control state update", "status": parse_time(control_state.get("updated_at"))},
-            {"item": "Active state update", "status": parse_time(state.get("updated_at"))},
-        ]
-    )
+    health = pd.DataFrame([
+        {"item": "Supabase", "status": "Connected" if supabase_connected else "Fallback/local"},
+        {"item": "Coinbase API key", "status": "Configured" if config.coinbase_api_key else "Missing"},
+        {"item": "Coinbase private key", "status": "Configured" if config.coinbase_api_secret else "Missing"},
+        {"item": "Trading mode", "status": config.trading_mode.upper()},
+        {"item": "Runner heartbeat", "status": heartbeat_text},
+    ])
     st.dataframe(health, use_container_width=True, hide_index=True)

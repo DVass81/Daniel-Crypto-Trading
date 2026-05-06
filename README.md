@@ -32,6 +32,8 @@ MAX_DAILY_LOSS_USD = "15"
 ESTIMATED_FEE_PCT = "0.006"
 WATCHLIST = "BTC-USD,ETH-USD,SOL-USD,XRP-USD,DOGE-USD,ADA-USD,AVAX-USD,LINK-USD"
 AUTO_SELECT_MARKET = "true"
+SCAN_MARKET_LIMIT = "40"
+NOTIFICATION_WEBHOOK_URL = ""
 SUPABASE_URL = "https://your-project.supabase.co"
 SUPABASE_ANON_KEY = "your-anon-key"
 ```
@@ -65,3 +67,5 @@ This repo includes `render.yaml` for a Render background worker. Add the same en
 Paper and live trading keep separate state records, so paper testing does not overwrite live state. The dashboard can switch modes, but live mode requires explicit confirmation text and Coinbase credentials.
 
 The bot can auto-select from `WATCHLIST` when `AUTO_SELECT_MARKET=true`. It manages one open position at a time and scores each watchlist market before choosing an entry candidate.
+
+The dashboard includes a Coinbase-style left navigation layout, Plotly candlestick charts with volume/RSI, a real Coinbase portfolio sync panel, broader USD market scanning, and notification events. If `NOTIFICATION_WEBHOOK_URL` is set, bot notifications are also posted to that webhook.

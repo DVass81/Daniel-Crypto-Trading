@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from .coinbase_client import CoinbaseClient
 from .config import BotConfig, load_config
 from .market_ai import best_buy_candidate
+from .notifier import notify
 from .storage import BotStorage
 from .strategy import score_market
 
@@ -42,6 +43,7 @@ def run_cycle(config: BotConfig | None = None) -> dict:
         storage.save_state(state, state_id)
         result = {"mode": config.trading_mode, "action": "HALTED", "reason": state.get("halt_reason") or "Bot is halted by risk control or operator setting.", "state": state}
         storage.log_event("cycle", result)
+        notify(storage, config, "Bot halted", result["reason"], "warning", {"state_id": state_id})
         return result
 
     if abs(min(0.0, float(state.get("daily_loss_usd", 0)))) >= abs(config.max_daily_loss_usd):
@@ -51,6 +53,7 @@ def run_cycle(config: BotConfig | None = None) -> dict:
         storage.save_state(state, state_id)
         result = {"mode": config.trading_mode, "action": "HALTED", "reason": "Max daily loss reached.", "state": state}
         storage.log_event("risk_halt", result)
+        notify(storage, config, "Daily loss lockout", "Max daily loss reached. Trading is halted.", "critical", {"state_id": state_id})
         return result
 
     has_position = float(state.get("base_size", 0) or 0) > 0
@@ -84,6 +87,7 @@ def run_cycle(config: BotConfig | None = None) -> dict:
                 "reason": signal.reason,
             }
             storage.log_event("trade_attempt", {"mode": config.trading_mode, "product_id": active_product_id, "preview": preview, "signal": asdict(signal), "selected_market": selected_market})
+            notify(storage, config, f"{active_product_id} buy attempt", signal.reason, "info", {"preview": preview, "signal": asdict(signal)})
             execution = client.place_market_buy(active_product_id, trade_usd)
             if execution.success:
                 base_bought = (trade_usd - fee) / signal.price
@@ -93,6 +97,7 @@ def run_cycle(config: BotConfig | None = None) -> dict:
                 state["product_id"] = active_product_id
                 state["total_fees"] = float(state.get("total_fees", 0)) + (fee if not config.live_enabled else 0)
             storage.log_event("trade_result", {"mode": config.trading_mode, "product_id": active_product_id, "preview": preview, "execution": asdict(execution)})
+            notify(storage, config, f"{active_product_id} buy {'filled' if execution.success else 'failed'}", signal.reason, "success" if execution.success else "error", {"execution": asdict(execution)})
     elif signal.action == "SELL" and signal.confidence >= config.confidence_to_sell and has_position:
         base_size = float(state.get("base_size", 0))
         quote_estimate = base_size * signal.price
@@ -107,6 +112,7 @@ def run_cycle(config: BotConfig | None = None) -> dict:
             "reason": signal.reason,
         }
         storage.log_event("trade_attempt", {"mode": config.trading_mode, "product_id": active_product_id, "preview": preview, "signal": asdict(signal)})
+        notify(storage, config, f"{active_product_id} sell attempt", signal.reason, "info", {"preview": preview, "signal": asdict(signal)})
         execution = client.place_market_sell(active_product_id, base_size, quote_estimate)
         if execution.success:
             entry_value = base_size * float(state.get("entry_price") or signal.price)
@@ -120,6 +126,7 @@ def run_cycle(config: BotConfig | None = None) -> dict:
             state["daily_loss_usd"] = min(0.0, float(state.get("daily_loss_usd", 0)) + pnl)
             state["total_fees"] = float(state.get("total_fees", 0)) + (fee if not config.live_enabled else 0)
         storage.log_event("trade_result", {"mode": config.trading_mode, "product_id": active_product_id, "preview": preview, "execution": asdict(execution)})
+        notify(storage, config, f"{active_product_id} sell {'filled' if execution.success else 'failed'}", signal.reason, "success" if execution.success else "error", {"execution": asdict(execution)})
 
     state["last_cycle_at"] = now_iso()
     state["last_action"] = signal.action

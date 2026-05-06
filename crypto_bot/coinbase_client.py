@@ -68,30 +68,27 @@ class CoinbaseClient:
     def get_accounts(self) -> list[dict[str, Any]]:
         if not self._client:
             return []
-        raw = self._client.get_accounts()
-        accounts = _field(raw, "accounts", raw if isinstance(raw, list) else [])
         rows = []
-        for account in accounts:
-            balance = _field(account, "available_balance", {})
-            hold = _field(account, "hold", {})
-            currency = _field(account, "currency", "")
-            available_value = _field(balance, "value", 0)
-            available_currency = _field(balance, "currency", currency)
-            hold_value = _field(hold, "value", 0)
-            rows.append(
-                {
-                    "currency": currency or available_currency,
-                    "available": available_value,
-                    "available_currency": available_currency,
-                    "hold": hold_value,
-                    "uuid": _field(account, "uuid", ""),
-                    "name": _field(account, "name", ""),
-                    "type": _field(account, "type", ""),
-                    "ready": _field(account, "ready", None),
-                    "active": _field(account, "active", None),
-                }
-            )
+        cursor = None
+        seen_cursors = set()
+        for _ in range(10):
+            raw = self._get_accounts_page(cursor)
+            accounts = _field(raw, "accounts", raw if isinstance(raw, list) else [])
+            rows.extend([_account_row(account) for account in accounts])
+            next_cursor = _field(raw, "cursor", None) or _field(raw, "next_cursor", None)
+            has_next = _field(raw, "has_next", False)
+            if not has_next or not next_cursor or next_cursor in seen_cursors:
+                break
+            seen_cursors.add(str(next_cursor))
+            cursor = next_cursor
         return rows
+
+    def get_account_by_currency(self, currency: str) -> dict[str, Any] | None:
+        target = currency.upper()
+        for account in self.get_accounts():
+            if str(account.get("currency") or "").upper() == target:
+                return account
+        return None
 
     def connection_diagnostics(self) -> dict[str, Any]:
         diagnostics = {
@@ -101,6 +98,7 @@ class CoinbaseClient:
             "init_error": self.init_error,
             "account_count": 0,
             "nonzero_account_count": 0,
+            "currencies_returned": "",
             "account_error": "",
         }
         if not self._client:
@@ -109,9 +107,31 @@ class CoinbaseClient:
             accounts = self.get_accounts()
             diagnostics["account_count"] = len(accounts)
             diagnostics["nonzero_account_count"] = sum(1 for account in accounts if _to_float(account.get("available")) > 0)
+            diagnostics["currencies_returned"] = ", ".join(sorted({str(account.get("currency") or "") for account in accounts if account.get("currency")}))
         except Exception as exc:
             diagnostics["account_error"] = str(exc)
         return diagnostics
+
+    def _get_accounts_page(self, cursor: str | None = None) -> Any:
+        call_attempts = []
+        if cursor:
+            call_attempts.extend(
+                [
+                    {"limit": 250, "cursor": cursor},
+                    {"cursor": cursor},
+                ]
+            )
+        call_attempts.extend([{"limit": 250}, {}])
+        last_error = None
+        for kwargs in call_attempts:
+            try:
+                return self._client.get_accounts(**kwargs)
+            except TypeError as exc:
+                last_error = exc
+                continue
+        if last_error:
+            raise last_error
+        return self._client.get_accounts()
 
     def get_available_balances(self) -> dict[str, float]:
         balances: dict[str, float] = {}
@@ -210,6 +230,26 @@ def _to_float(value: Any) -> float:
         return float(value or 0)
     except (TypeError, ValueError):
         return 0.0
+
+
+def _account_row(account: Any) -> dict[str, Any]:
+    balance = _field(account, "available_balance", {})
+    hold = _field(account, "hold", {})
+    currency = _field(account, "currency", "")
+    available_value = _field(balance, "value", 0)
+    available_currency = _field(balance, "currency", currency)
+    hold_value = _field(hold, "value", 0)
+    return {
+        "currency": currency or available_currency,
+        "available": available_value,
+        "available_currency": available_currency,
+        "hold": hold_value,
+        "uuid": _field(account, "uuid", ""),
+        "name": _field(account, "name", ""),
+        "type": _field(account, "type", ""),
+        "ready": _field(account, "ready", None),
+        "active": _field(account, "active", None),
+    }
 
 
 def _product_row(value: Any) -> dict[str, Any]:

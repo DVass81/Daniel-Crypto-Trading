@@ -687,6 +687,8 @@ elif page == "Portfolio":
     diag_cols[1].metric("Accounts", coinbase_diagnostics.get("account_count", 0))
     diag_cols[2].metric("Nonzero Accounts", coinbase_diagnostics.get("nonzero_account_count", 0))
     diag_cols[3].metric("Key Loaded", "Yes" if coinbase_configured else "No")
+    if coinbase_diagnostics.get("currencies_returned"):
+        st.caption(f"Coinbase returned: {coinbase_diagnostics['currencies_returned']}")
 
     if not coinbase_client_ready:
         st.error("Coinbase client is not ready. Check COINBASE_API_KEY and COINBASE_API_SECRET in Streamlit secrets.")
@@ -702,6 +704,16 @@ elif page == "Portfolio":
                 st.error(f"Coinbase balance sync failed: {exc}")
         accounts_frame = st.session_state.get("coinbase_accounts", pd.DataFrame())
         portfolio = st.session_state.get("coinbase_portfolio", pd.DataFrame())
+        st.subheader("ADA Lookup")
+        if isinstance(accounts_frame, pd.DataFrame) and not accounts_frame.empty and "currency" in accounts_frame.columns:
+            ada_rows = accounts_frame[accounts_frame["currency"].astype(str).str.upper().eq("ADA")]
+            if not ada_rows.empty:
+                st.success("ADA was returned by Coinbase.")
+                st.dataframe(ada_rows, use_container_width=True, hide_index=True)
+            else:
+                st.warning("ADA was not returned by Coinbase for this API key/account.")
+        else:
+            st.info("Refresh Coinbase Balances to check whether ADA is returned.")
         if isinstance(portfolio, pd.DataFrame) and not portfolio.empty:
             st.metric("Coinbase Estimated Value", fmt_money(portfolio["value_usd"].sum()))
             st.dataframe(portfolio, use_container_width=True, hide_index=True)
@@ -808,6 +820,7 @@ elif page == "Settings":
         {"item": "Coinbase private key", "status": "Configured" if config.coinbase_api_secret else "Missing"},
         {"item": "Coinbase client", "status": "Ready" if coinbase_client_ready else f"Not ready: {coinbase_diagnostics.get('init_error') or 'unknown'}"},
         {"item": "Coinbase accounts", "status": str(coinbase_diagnostics.get("account_count", 0))},
+        {"item": "Coinbase currencies", "status": coinbase_diagnostics.get("currencies_returned") or "None returned"},
         {"item": "Trading mode", "status": config.trading_mode.upper()},
         {"item": "Runner heartbeat", "status": heartbeat_text},
     ])
